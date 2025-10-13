@@ -1,0 +1,8 @@
+requests>=2.31.0
+colorama>=0.4.6
+tqdm>=4.66.1
+jinja2>=3.1.2
+python-dotenv>=1.0.0
+requests-futures>=1.0.0
+pyyaml>=6.0.1
+urllib3>=2.0.7

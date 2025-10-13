@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>OSS漏洞扫描报告 | H4CK3R V1.0</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Consolas', 'Courier New', monospace;
+            background-color: #0d0221;
+            color: #00ff41;
+            margin: 20px;
+            background-image: 
+                linear-gradient(rgba(0, 255, 65, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 255, 65, 0.1) 1px, transparent 1px);
+            background-size: 20px 20px;
+            position: relative;
+            min-height: 100vh;
+        }
+        
+        /* 扫描线效果 */
+        body::after {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 5px;
+            background: linear-gradient(90deg, transparent, rgba(0, 255, 65, 0.8), transparent);
+            animation: scan 2s linear infinite;
+            pointer-events: none;
+            z-index: 100;
+        }
+        
+        @keyframes scan {
+            0% { top: 0; }
+            100% { top: 100%; }
+        }
+        
+        h1 {
+            color: #00ff41;
+            text-align: center;
+            margin: 30px 0;
+            text-shadow: 0 0 5px #00ff41, 0 0 10px #00ff41;
+            font-size: 2.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        h1::after {
+            content: "|";
+            animation: blink 1s step-end infinite;
+        }
+        
+        @keyframes blink {
+            from, to { opacity: 1; }
+            50% { opacity: 0; }
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 30px;
+            border: 1px solid rgba(0, 255, 65, 0.3);
+            background-color: rgba(13, 2, 33, 0.8);
+            position: relative;
+            z-index: 10;
+        }
+        
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border: 1px solid rgba(0, 255, 65, 0.2);
+            transition: all 0.3s ease;
+        }
+        
+        th {
+            background-color: rgba(0, 255, 65, 0.1);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        tr:hover {
+            box-shadow: 0 0 15px rgba(0, 255, 65, 0.3);
+            transform: scale(1.01);
+        }
+        
+        /* 风险等级样式 */
+        .critical {
+            color: #ff2a6d;
+            text-shadow: 0 0 5px #ff2a6d, 0 0 10px #ff2a6d;
+        }
+        
+        .high {
+            color: #ff9900;
+            text-shadow: 0 0 5px #ff9900, 0 0 10px #ff9900;
+        }
+        
+        .medium {
+            color: #f7f700;
+            text-shadow: 0 0 5px #f7f700, 0 0 10px #f7f700;
+        }
+        
+        .low {
+            color: #00ff41;
+            text-shadow: 0 0 5px #00ff41, 0 0 10px #00ff41;
+        }
+        
+        .error {
+            color: #9d4edd;
+            text-shadow: 0 0 5px #9d4edd, 0 0 10px #9d4edd;
+        }
+        
+        a {
+            color: #05d9e8;
+            text-decoration: none;
+            position: relative;
+        }
+        
+        a::after {
+            content: "";
+            position: absolute;
+            width: 0;
+            height: 1px;
+            bottom: -2px;
+            left: 0;
+            background-color: #05d9e8;
+            transition: width 0.3s ease;
+        }
+        
+        a:hover::after {
+            width: 100%;
+        }
+        
+        a:hover {
+            text-shadow: 0 0 5px #05d9e8, 0 0 10px #05d9e8;
+        }
+        
+        /* 响应体样式 */
+        .response-content {
+            max-height: 150px;
+            overflow-y: auto;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        /* 加载动画 */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        tr {
+            animation: fadeIn 0.5s ease forwards;
+            opacity: 0;
+        }
+        
+        tr:nth-child(1) { animation-delay: 0.1s; }
+        tr:nth-child(2) { animation-delay: 0.2s; }
+        tr:nth-child(3) { animation-delay: 0.3s; }
+        tr:nth-child(4) { animation-delay: 0.4s; }
+        tr:nth-child(5) { animation-delay: 0.5s; }
+        /* 更多行的延迟可以通过JS动态添加 */
+    </style>
+</head>
+<body>
+    <h1>OSS存储桶漏洞扫描报告</h1>
+    <table>
+        <tr>
+            <th>风险等级</th>
+            <th>描述</th>
+            <th>URL</th>
+            <th>响应体</th>
+        </tr>
+        
+        <tr class="critical
+                  ">
+            <td>CRITICAL3</td>
+            <td>Bucket允许匿名PUT上传: http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/oss_scan_test_eb4eeab5-0fd0-4c65-8f9a-546da58a3d40.txt</td>
+            <td><a href="http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/oss_scan_test_eb4eeab5-0fd0-4c65-8f9a-546da58a3d40.txt" target="_blank">http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/oss_scan_test_eb4eeab5-0fd0-4c65-8f9a-546da58a3d40.txt</a></td>
+            <td>
+                <div class="response-content">
+                    无响应体数据
+                </div>
+            </td>
+        </tr>
+        
+        <tr class="critical
+                  ">
+            <td>CRITICAL4</td>
+            <td>Bucket允许匿名DELETE: http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/oss_scan_test_83db6bf5-df87-4f1d-a38e-1694ff33e9fd.txt</td>
+            <td><a href="http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/oss_scan_test_83db6bf5-df87-4f1d-a38e-1694ff33e9fd.txt" target="_blank">http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/oss_scan_test_83db6bf5-df87-4f1d-a38e-1694ff33e9fd.txt</a></td>
+            <td>
+                <div class="response-content">
+                    无响应体数据
+                </div>
+            </td>
+        </tr>
+        
+        <tr class="critical
+                  ">
+            <td>CRITICAL3</td>
+            <td>阿里云对象存储允许任意文件上传: http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/aliyun_scan_test_cb61caa7-263f-4111-8aec-ebbebd99de06.txt</td>
+            <td><a href="http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/aliyun_scan_test_cb61caa7-263f-4111-8aec-ebbebd99de06.txt" target="_blank">http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/aliyun_scan_test_cb61caa7-263f-4111-8aec-ebbebd99de06.txt</a></td>
+            <td>
+                <div class="response-content">
+                    无响应体数据
+                </div>
+            </td>
+        </tr>
+        
+        <tr class="medium
+                  ">
+            <td>MEDIUM1</td>
+            <td>阿里云Object ACL可读: http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/aliyun_acl_test_12f1264a-ce9b-41c9-928f-9fac92c4eb24.txt</td>
+            <td><a href="http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/aliyun_acl_test_12f1264a-ce9b-41c9-928f-9fac92c4eb24.txt" target="_blank">http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com/aliyun_acl_test_12f1264a-ce9b-41c9-928f-9fac92c4eb24.txt</a></td>
+            <td>
+                <div class="response-content">
+                    无响应体数据
+                </div>
+            </td>
+        </tr>
+        
+        <tr class="low
+                  ">
+            <td>LOW2</td>
+            <td>阿里云Bucket允许HTTP访问: http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com</td>
+            <td><a href="http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com" target="_blank">http://hx-cloud-security-ctf-2jak0.oss-cn-beijing.aliyuncs.com</a></td>
+            <td>
+                <div class="response-content">
+                    无响应体数据
+                </div>
+            </td>
+        </tr>
+        
+    </table>
+
+    <script>
+        // 动态添加表格行的动画延迟
+        document.addEventListener('DOMContentLoaded', () => {
+            const rows = document.querySelectorAll('table tr');
+            rows.forEach((row, index) => {
+                row.style.animationDelay = `${index * 0.1}s`;
+            });
+
+            // 模拟终端字符输入效果
+            const h1 = document.querySelector('h1');
+            const text = h1.textContent;
+            h1.textContent = '';
+            let i = 0;
+            
+            function typeWriter() {
+                if (i < text.length) {
+                    h1.textContent += text.charAt(i);
+                    i++;
+                    setTimeout(typeWriter, 50);
+                }
+            }
+            
+            typeWriter();
+        });
+    </script>
+</body>
+</html>
