@@ -26,7 +26,7 @@ OSS_Scanner 是一款**多厂商 OSS 存储桶漏洞扫描工具**，支持阿�
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/你的GitHub用户名/OSS_Scanner.git
+git clone https://github.com/bitboy-sys/OSS_Scanner.git
 cd OSS_Scanner
 ```
 
@@ -152,7 +152,7 @@ tencent_http = http://{bucket}.cos.{region}.myqcloud.com
 ## 📞 作者信息
 
 - 作者：sjdalu
-- 项目地址：[https://github.com/ 你的 GitHub 用户名 / OSS_Scanner](https://github.com/你的GitHub用户名/OSS_Scanner)
+- 项目地址：[https://github.com/bitboy-sys/OSS_Scanner](https://github.com/bitboy-sys/OSS_Scanner)
 - 版本：v1.1（2025-10）
 
 ## 📝 版本更新日志
