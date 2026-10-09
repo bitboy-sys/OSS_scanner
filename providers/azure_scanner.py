@@ -1,156 +1,95 @@
-import time
+"""Azure Blob 存储扫描器。
+
+Azure 的寻址模型与其他厂商不同：目标是「存储账户 + 容器」，因此构造 URL
+需要 ``account`` 参数，未提供时无法确定地址。
+"""
 import uuid
-from core.scanner_base import ScannerBase
-from typing import List, Dict
-from utils.http_utils import request_url
-from core.risk_analyzer import RiskLevel
-from utils.log_utils import logger
+from typing import Dict, List, Optional
+
+from core.risk_analyzer import Risk
+from core.scanner_base import ProviderSpec, ScannerBase
+from utils.credentials import TemporaryCredential
+
+SPEC = ProviderSpec(
+    name="azure",
+    display_name="Azure Blob",
+    action_prefix="",
+    list_element="EnumerationResults",
+    list_queries=("?restype=container&comp=list&maxresults=10",),
+    exists_status=(200, 403),
+)
+
+_BLOB_TEST_PREFIX = "azure_blob_test_"
 
 
 class AzureScanner(ScannerBase):
-    def __init__(self, bucket: str, region: str, config: Dict, account: str = ""):
-        self.account = account  # Azure存储账户名
-        super().__init__(bucket, region, config)
+    spec = SPEC
 
-    def _get_base_urls(self) -> List[str]:
-        """生成Azure Blob存储基础URL"""
-        urls = []
+    def __init__(self, bucket: str, region: str, config: Dict, account: str = "",
+                 credential: Optional[TemporaryCredential] = None):
+        self.account = account
+        super().__init__(bucket, region, config, credential)
+
+    def _templates(self) -> List[str]:
         if not self.account:
-            return urls
+            return []
+        template = self.config.get("CLOUD_TEMPLATES", {}).get("azure_blob_url", "")
+        if not template:
+            return []
+        return [template.format(account=self.account, container=self.bucket)]
 
-        # Azure Blob URL格式: https://{account}.blob.core.windows.net/{container}
-        template = self.config["CLOUD_TEMPLATES"].get("azure_blob_url", "").format(
-            account=self.account, container=self.bucket
-        )
+    # ------------------------------------------------------------ 检查
 
-        if not self.config.get("https_only", False):
-            urls.append(template.replace("https://", "http://"))
-        urls.append(template)
-        return urls
-
-    def check_bucket_exist(self) -> bool:
-        """检测Azure Container是否存在"""
-        for base_url in self.base_urls:
-            resp = request_url(
-                base_url,
-                method="HEAD",
-                timeout=self.config["request_timeout"],
-                retry=self.config["max_retry"]
-            )
-            # Azure存储账户不存在会返回400，容器不存在返回404
-            if resp["status_code"] == 404:
+    def scan_container_acl(self) -> None:
+        """读取容器 ACL，判断是否开放了匿名公共访问。"""
+        for base_url in self.target_urls():
+            acl_url = f"{base_url}?restype=container&comp=acl"
+            resp = self._request(acl_url, method="GET")
+            if resp["status_code"] != 200:
                 continue
-            elif resp["status_code"] in [200, 403]:
-                return True
-        return False
-
-    def scan_sensitive_files(self) -> None:
-        """扫描敏感文件"""
-        sensitive_paths = []
-        for path_key in ["key_paths", "db_paths", "config_paths", "log_paths", "src_paths"]:
-            sensitive_paths.extend(self.config["SENSITIVE_PATHS"][path_key].split(","))
-
-        for path in sensitive_paths:
-            path = path.strip()
-            for base_url in self.base_urls:
-                file_url = f"{base_url}/{path}"
-                resp = request_url(
-                    file_url,
-                    method="HEAD",
-                    timeout=self.config["request_timeout"],
-                    retry=self.config["max_retry"]
+            content = resp.get("content", "")
+            # publicAccess 为 off 或缺省表示未开放匿名访问
+            if "publicAccess" not in content:
+                continue
+            if "container" in content or "blob" in content:
+                self.add_finding(
+                    Risk.BLOB_PUBLIC_ACCESS,
+                    f"容器开放了匿名公共访问: {acl_url}",
+                    acl_url,
+                    resp=resp,
                 )
-                if resp["accessible"]:
-                    if path in self.config["SENSITIVE_PATHS"]["key_paths"].split(","):
-                        risk = RiskLevel.CRITICAL1
-                    elif path in self.config["SENSITIVE_PATHS"]["db_paths"].split(","):
-                        risk = RiskLevel.CRITICAL2
-                    else:
-                        risk = RiskLevel.MEDIUM1 if path in self.config["SENSITIVE_PATHS"]["config_paths"].split(
-                            ",") else RiskLevel.LOW1
-
-                    self.results.append({
-                        "risk": risk,
-                        "msg": f"发现敏感文件（{risk.name}）: {file_url} | 大小: {resp['content_length'] / 1024 / 1024:.2f}MB",
-                        "url": file_url
-                    })
-                time.sleep(self.config["request_interval"])
+                return
 
     def scan_blob_public_access(self) -> None:
-        """59 Azure Blob公开访问"""
-        test_file = f"azure_blob_test_{uuid.uuid4()}.txt"
-        for base_url in self.base_urls:
+        """上传标记为私有的 Blob 后尝试匿名读取。"""
+        if not self.intrusive_enabled:
+            return
+        test_file = f"{_BLOB_TEST_PREFIX}{uuid.uuid4()}.txt"
+        for base_url in self.target_urls():
             blob_url = f"{base_url}/{test_file}"
-            # 上传时设置私有
-            upload_resp = request_url(
-                blob_url,
-                method="PUT",
-                data="test_blob_content",
-                headers={"x-ms-blob-public-access": "off"},
-                timeout=self.config["request_timeout"],
-                retry=1
-            )
-            if upload_resp["status_code"] not in [200, 201]:
+            upload_resp = self._request(blob_url, method="PUT", data="azure_scan_test",
+                                        headers={"x-ms-blob-public-access": "off",
+                                                 "x-ms-blob-type": "BlockBlob"},
+                                        retry=1)
+            if upload_resp["status_code"] not in (200, 201):
                 continue
 
-            # 尝试匿名访问
-            access_resp = request_url(
-                blob_url,
-                method="GET",
-                timeout=self.config["request_timeout"],
-                retry=1
-            )
-            request_url(blob_url, method="DELETE", timeout=5)
+            access_resp = self._request(blob_url, method="GET", retry=1)
+            self._request(blob_url, method="DELETE", timeout=5)
 
             if access_resp["status_code"] == 200:
-                self.results.append({
-                    "risk": RiskLevel.MEDIUM1,
-                    "msg": f"Azure Blob存在公开访问漏洞: {blob_url}",
-                    "url": blob_url
-                })
+                self.add_finding(
+                    Risk.BLOB_PUBLIC_ACCESS,
+                    f"标记为私有的 Blob 仍可被匿名读取: {blob_url}",
+                    blob_url,
+                    resp=access_resp,
+                )
                 return
 
-    def scan_container_traversal(self) -> None:
-        """60 Azure Container Blob遍历"""
-        if not self.config.get("scan_directory_traversal", False):
-            return
+    # ------------------------------------------------------------ 流水线
 
-        for base_url in self.base_urls:
-            # 列出Blob
-            list_url = f"{base_url}?restype=container&comp=list&maxresults=10"
-            resp = request_url(
-                list_url,
-                method="GET",
-                timeout=self.config["request_timeout"],
-                retry=self.config["max_retry"]
-            )
-            if resp["status_code"] == 200 and "EnumerationResults" in resp.get("content", ""):
-                self.results.append({
-                    "risk": RiskLevel.HIGH1,
-                    "msg": f"Azure Container存在Blob遍历漏洞: {list_url}",
-                    "url": list_url
-                })
-                return
-
-    def run_scan(self) -> List[Dict]:
-        """执行完整扫描流程"""
-        logger.info(f"[Azure Container: {self.bucket}] 开始扫描")
-        self.results = []
-
-        if not self.check_bucket_exist():
-            self.results.append({
-                "risk": RiskLevel.LOW1,
-                "msg": f"Azure Container不存在: {self.bucket}",
-                "url": self.base_urls[0] if self.base_urls else ""
-            })
-            return self.results
-
-        self.check_bucket_permission()
-        self.scan_sensitive_files()
-
-        # 新增漏洞扫描
-        self.scan_blob_public_access()
-        self.scan_container_traversal()
-
-        logger.info(f"[Azure Container: {self.bucket}] 扫描完成，发现{len(self.results)}个风险项")
-        return self.results
+    def scan_provider_specific(self) -> None:
+        self.scan_container_acl()
+        self._warn_blocked("scan_blob_public_access", "Blob 匿名公开访问检测")
+        if self.intrusive_enabled and self.config.get("scan_blob_public_access", False):
+            self.scan_blob_public_access()

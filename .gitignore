@@ -1,0 +1,40 @@
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.tox/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# 扫描产物
+reports/
+*.xlsx
+ai_cache.json
+
+# 日志
+*.log
+oss_scan.log*
+
+# 凭据与私有配置：VPN 配置内含证书与私钥，绝不能提交
+*.ovpn
+*.pem
+*.key
+.env
+.env.*
+
+# 本机临时脚本与诊断文件（不属于本项目）
+.htb-test*
+.clash_ovpn_test.py
+
+# 本机代理工具的会话状态，不属于项目内容
+.zcode/
