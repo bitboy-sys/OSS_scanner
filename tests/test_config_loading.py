@@ -115,3 +115,31 @@ def test_sts_section_loads_credential_file(tmp_path):
 def test_ai_provider_key_loads(tmp_path):
     path = write(tmp_path, "[DEFAULT]\n\n[AI_CONFIG]\nprovider = deepseek\nenabled = true\n")
     assert cli.load_config(path)["AI_CONFIG"]["provider"] == "deepseek"
+
+
+def test_proxy_read_from_config_file(tmp_path):
+    """回归：proxy 此前只能走命令行，写在配置文件里会被静默忽略。"""
+    path = write(tmp_path, "[DEFAULT]\nproxy = http://127.0.0.1:7897\n")
+    assert cli.load_config(path)["proxy"] == "http://127.0.0.1:7897"
+
+
+def test_proxy_defaults_to_empty(tmp_path):
+    assert cli.load_config(write(tmp_path, "[DEFAULT]\n"))["proxy"] == ""
+
+
+def test_real_config_file_has_proxy_key():
+    assert "proxy" in cli.load_config("config/config.ini")
+
+
+def test_ai_inherits_global_proxy(fake_bucket):
+    """AI 请求必须沿用全局代理，否则云端模型会绕过代理直连。"""
+    from utils.ai_utils import AIConfig
+    config = {"proxy": "http://127.0.0.1:7897", "AI_CONFIG": {"enabled": "true"}}
+    assert AIConfig.from_config(config).proxy == "http://127.0.0.1:7897"
+
+
+def test_ai_section_proxy_overrides_global():
+    from utils.ai_utils import AIConfig
+    config = {"proxy": "http://127.0.0.1:7897",
+              "AI_CONFIG": {"proxy": "socks5://127.0.0.1:1080"}}
+    assert AIConfig.from_config(config).proxy == "socks5://127.0.0.1:1080"

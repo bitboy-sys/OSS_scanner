@@ -1,6 +1,9 @@
 """OSS 存储桶漏洞扫描工具 —— 命令行入口。"""
 import argparse
+import difflib
 import os
+import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from configparser import ConfigParser
 from configparser import Error as ConfigError
@@ -34,13 +37,19 @@ from utils.credentials import (
     load_credential,
     validate_for_scan,
 )
-from utils.endpoint_parser import parse_endpoint
+from utils.endpoint_parser import detect_cloud, parse_endpoint
 from utils.file_utils import load_bucket_list, load_ignore_list, save_results
 from utils.hostid_extractor import extract_endpoint_from_page
 from utils.http_utils import set_burst, set_default_interval
 from utils.log_utils import init_logger, logger
 from utils.report_utils import generate_report, summarize
 from utils.signing import supported_providers
+from utils.sts_client import (
+    DEFAULT_DURATION,
+    SUPPORTED_ASSUME_ROLE,
+    assume_role,
+    load_base_credential,
+)
 from version import __version__
 
 TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,8 +89,71 @@ _BOOL_KEYS = (
 
 _INT_KEYS = {"request_timeout": 10, "max_retry": 2, "request_burst": 5}
 _FLOAT_KEYS = {"request_interval": 0.3}
+# 直接取字符串的键
+_STR_KEYS = ("user_agent", "proxy")
 
 DEFAULT_CONFIG_PATH = os.path.join("config", "config.ini")
+
+# 各厂商区域代码的形态特征 + 已知区域，用于把「拼错的区域」变成明确提示，
+# 而不是拼出一个不存在的域名后一路静默扫描。
+_REGION_RULES = {
+    "aliyun": {
+        "pattern": re.compile(r"^(cn|ap|eu|us|me|na|af)-[a-z]+(-[a-z0-9]+)*$"),
+        "hint": "cn-beijing、cn-hangzhou、cn-shanghai、ap-southeast-1、us-east-1",
+        "known": ("cn-beijing", "cn-hangzhou", "cn-shanghai", "cn-shenzhen", "cn-zhangjiakou",
+                  "cn-chengdu", "cn-hongkong", "ap-southeast-1", "ap-southeast-2",
+                  "ap-northeast-1", "ap-south-1", "us-east-1", "us-west-1", "eu-central-1"),
+    },
+    "tencent": {
+        "pattern": re.compile(r"^ap-[a-z]+(-[a-z0-9]+)*$"),
+        "hint": "ap-beijing、ap-shanghai、ap-guangzhou、ap-chengdu、ap-hongkong",
+        "known": ("ap-beijing", "ap-shanghai", "ap-guangzhou", "ap-chengdu", "ap-chongqing",
+                  "ap-nanjing", "ap-hongkong", "ap-singapore", "ap-seoul", "ap-tokyo",
+                  "na-siliconvalley", "eu-frankfurt"),
+    },
+    "huawei": {
+        "pattern": re.compile(r"^[a-z]{2}-[a-z]+(-[0-9]+)?$"),
+        "hint": "cn-north-4、cn-east-3、cn-south-1、ap-southeast-1",
+        "known": ("cn-north-1", "cn-north-4", "cn-east-2", "cn-east-3", "cn-south-1",
+                  "cn-southwest-2", "ap-southeast-1", "ap-southeast-2", "ap-southeast-3"),
+    },
+    "aws": {
+        "pattern": re.compile(r"^[a-z]{2}(-[a-z]+)+-[0-9]+$"),
+        "hint": "us-east-1、us-west-2、eu-west-1、ap-southeast-1、ap-northeast-1",
+        "known": ("us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
+                  "eu-west-2", "eu-central-1", "ap-southeast-1", "ap-southeast-2",
+                  "ap-northeast-1", "ap-northeast-2", "ap-south-1", "sa-east-1", "ca-central-1"),
+    },
+}
+
+
+def _warn_region_shape(cloud: str, region: str) -> None:
+    """区域看起来不像有效值时给出提示。
+
+    只警告不拦截：区域列表会持续新增，硬报错会挡住合法的新区域。
+    对拼写接近已知区域的写法会给出「是否想用」的建议。
+    """
+    rule = _REGION_RULES.get(cloud)
+    if not rule or not region:
+        return
+
+    known = rule["known"]
+    # 与已知区域完全一致，正常
+    if region in known:
+        return
+
+    suggestion = difflib.get_close_matches(region, known, n=1, cutoff=0.6)
+    # 形态正确且没有相近的已知区域：可能是较新的区域，放行
+    if rule["pattern"].match(region) and not suggestion:
+        return
+
+    logger.warning(
+        f"{Fore.YELLOW}[!] 区域 '{region}' 看起来不是 {cloud} 的有效区域，"
+        f"继续扫描可能得到「Bucket 不存在」的误判{Style.RESET_ALL}"
+    )
+    if suggestion:
+        logger.warning(f"{Fore.YELLOW}    是否想用 '{suggestion[0]}'？{Style.RESET_ALL}")
+    logger.warning(f"{Fore.YELLOW}    常见取值：{rule['hint']}{Style.RESET_ALL}")
 
 
 def _clean(value: str) -> str:
@@ -126,7 +198,8 @@ def load_config(config_path: str = DEFAULT_CONFIG_PATH, debug: bool = False) -> 
         config[key] = parser.getint("DEFAULT", key, fallback=fallback)
     for key, fallback in _FLOAT_KEYS.items():
         config[key] = parser.getfloat("DEFAULT", key, fallback=fallback)
-    config["user_agent"] = _clean(parser.get("DEFAULT", "user_agent", fallback=""))
+    for key in _STR_KEYS:
+        config[key] = _clean(parser.get("DEFAULT", key, fallback=""))
 
     # 其余 section 只保留自己的键，避免 ConfigParser 把 DEFAULT 注入到每个 section
     for section in parser.sections():
@@ -144,7 +217,7 @@ def load_config(config_path: str = DEFAULT_CONFIG_PATH, debug: bool = False) -> 
             auto_extract[key] = fallback
 
     unknown = sorted(set(parser.defaults()) - set(_BOOL_KEYS) - set(_INT_KEYS)
-                     - set(_FLOAT_KEYS) - {"user_agent"})
+                     - set(_FLOAT_KEYS) - set(_STR_KEYS))
     if unknown:
         logger.warning(f"配置文件 [DEFAULT] 中存在未被识别的键，已被忽略: {', '.join(unknown)}")
 
@@ -187,11 +260,21 @@ def scan_single_bucket(bucket: str, cloud: str, region: str, config: Dict,
                               "", bucket=bucket, cloud=cloud, region=region)]
 
 
+def _looks_like_endpoint(value: str) -> bool:
+    """判断 --bucket 传进来的其实是端点地址而不是裸桶名。"""
+    if not value:
+        return False
+    if "://" in value:
+        return True
+    return detect_cloud(value.split(":")[0]) is not None
+
+
 def resolve_target(args, config: Dict) -> Optional[Dict]:
     """确定扫描目标（厂商 / Bucket / 区域 / 账户）。
 
     输入优先级：命令行 Bucket 参数 > 命令行端点 URL > 配置文件默认端点 URL。
-    端点 URL 若本身就是存储地址则直接解析，否则当作网页抓取其中的 HostId。
+    端点既可直接写成存储地址，也可写成含 <HostId> 的网页；若 --bucket 直接
+    传了完整地址（如 https://b.cos.ap-beijing.myqcloud.com），同样会自动解析。
     """
     cloud = args.cloud
     bucket = args.bucket
@@ -199,16 +282,36 @@ def resolve_target(args, config: Dict) -> Optional[Dict]:
     account = args.account or ""
     appid = args.tencent_appid or ""
 
+    # --bucket 直接给了端点地址：从地址里取出桶名、厂商与区域
+    if bucket and _looks_like_endpoint(bucket):
+        try:
+            endpoint = parse_endpoint(bucket, cloud)
+        except ValueError as exc:
+            logger.error(f"--bucket 看起来是端点地址但无法解析：{exc}")
+            return None
+        logger.info(f"从 --bucket 的地址中解析出：厂商={endpoint.cloud} "
+                    f"Bucket={endpoint.bucket} 区域={endpoint.region or '-'}")
+        cloud = cloud or endpoint.cloud
+        bucket = endpoint.bucket
+        region = region or endpoint.region
+        account = account or endpoint.account
+        appid = appid or endpoint.appid
+        if not args.bucket_list and not args.bucket_file:
+            _warn_region_shape(cloud, region)
+
     if bucket or args.bucket_list or args.bucket_file:
         if not cloud:
-            logger.error("使用 --bucket/--bucket-list/--bucket-file 时必须指定 --cloud")
+            logger.error("使用 --bucket/--bucket-list/--bucket-file 时必须指定 --cloud，"
+                         "或直接传入完整端点地址让程序自动识别")
             return None
         if cloud in REGION_REQUIRED and not region:
-            logger.error(f"{cloud} 需要指定 --region（如 aliyun 的 ap-southeast-1、aws 的 us-east-1）")
+            logger.error(f"{cloud} 需要指定 --region（如 aliyun 的 ap-southeast-1、aws 的 us-east-1），"
+                         f"或直接在 --bucket 里传入完整端点地址")
             return None
         if cloud == "azure" and not account:
             logger.error("azure 需要同时指定 --account（存储账户名）与 --bucket（容器名）")
             return None
+        _warn_region_shape(cloud, region)
         return {"cloud": cloud, "buckets": load_bucket_list(bucket, args.bucket_list, args.bucket_file),
                 "region": region, "account": account, "appid": appid}
 
@@ -224,7 +327,8 @@ def resolve_target(args, config: Dict) -> Optional[Dict]:
     except ValueError as direct_error:
         logger.info(f"未能直接解析为存储端点（{direct_error}），尝试抓取页面中的 HostId")
         try:
-            endpoint = extract_endpoint_from_page(endpoint_url, cloud, timeout=timeout)
+            endpoint = extract_endpoint_from_page(endpoint_url, cloud, timeout=timeout,
+                                                 proxy=config.get("proxy"))
         except ValueError as page_error:
             logger.error(f"端点解析失败: {page_error}")
             return None
@@ -308,6 +412,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sts-token", help="临时凭证 SecurityToken（也可用环境变量 "
                                            f"{ENV_SECURITY_TOKEN}）")
     parser.add_argument("--sts-file", help="保存 STS 凭证的 JSON 文件（AssumeRole 响应原样即可）")
+    parser.add_argument("--role-arn", help="用长期凭证自动换取临时凭证（AssumeRole），"
+                                          "支持 aws / aliyun")
+    parser.add_argument("--role-ak", help="换取临时凭证用的长期 AccessKeyId"
+                                         "（或环境变量 OSS_SCANNER_ROLE_AK）")
+    parser.add_argument("--role-sk", help="换取临时凭证用的长期 AccessKeySecret"
+                                         "（或环境变量 OSS_SCANNER_ROLE_SK）")
+    parser.add_argument("--role-session", help="AssumeRole 的会话名，默认自动生成")
+    parser.add_argument("--role-duration", type=int, help="临时凭证有效期（秒），默认 3600")
+    parser.add_argument("--sts-endpoint", help="STS 端点地址，默认使用各厂商官方地址")
     parser.add_argument("--hostid-url", "--endpoint-url", dest="endpoint_url",
                         help="端点地址或含 <HostId> 的页面地址；缺省时读取配置 AUTO_EXTRACT.hostid_url")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="配置文件路径")
@@ -373,27 +486,64 @@ def build_ai_client(args, config: Dict) -> AIClient:
 
 
 def resolve_credential(args, config: Dict, cloud: str) -> Optional[TemporaryCredential]:
-    """加载并校验临时凭证；返回 None 表示以匿名身份扫描。"""
-    credential, error = load_credential(args, config, cloud)
-    if error:
-        logger.error(f"临时凭证不可用：{error}")
+    """加载并校验临时凭证；返回 None 表示以匿名身份扫描。
+
+    两种来源：直接用现成的临时凭证（--sts-*），或用长期凭证 + RoleArn 现场
+    换取（--role-arn）。已显式提供临时凭证时不重复申请。
+    """
+    direct, direct_error = load_credential(args, config, cloud)
+
+    # 一、通过 AssumeRole 现场换取
+    role_arn = (getattr(args, "role_arn", "") or
+                str((config.get("STS", {}) or {}).get("role_arn", "")).strip())
+    if role_arn and direct is None:
+        if cloud not in SUPPORTED_ASSUME_ROLE:
+            logger.error(f"{cloud} 暂不支持自动 AssumeRole，"
+                         f"可改用 --sts-file 导入 AssumeRole 响应"
+                         f"（当前支持: {'、'.join(SUPPORTED_ASSUME_ROLE)}）")
+            return None
+        base, base_error = load_base_credential(args, config, cloud)
+        if base_error:
+            logger.error(f"无法换取临时凭证：{base_error}")
+            return None
+        duration = int(getattr(args, "role_duration", 0) or
+                       (config.get("STS", {}) or {}).get("duration") or DEFAULT_DURATION)
+        credential, error = assume_role(
+            cloud, base, role_arn,
+            session_name=getattr(args, "role_session", "") or
+            str((config.get("STS", {}) or {}).get("role_session_name", "")),
+            duration=duration,
+            endpoint=getattr(args, "sts_endpoint", "") or
+            str((config.get("STS", {}) or {}).get("endpoint", "")),
+            proxy=config.get("proxy"),
+            timeout=config.get("request_timeout", 15),
+        )
+        if error:
+            logger.error(f"换取临时凭证失败：{error}")
+            return None
+        logger.info(credential.describe())
+        return credential
+
+    # 二、直接使用现成的临时凭证
+    if direct_error:
+        logger.error(f"临时凭证不可用：{direct_error}")
         return None
-    if credential is None:
+    if direct is None:
         return None
 
     if cloud and cloud not in supported_providers():
         logger.warning(f"{cloud} 暂不支持请求签名，临时凭证将被忽略，本次以匿名身份扫描")
         return None
 
-    problem = validate_for_scan(credential, cloud, require_token=True)
+    problem = validate_for_scan(direct, cloud, require_token=True)
     if problem:
         logger.error(f"临时凭证不可用：{problem}")
         return None
 
-    if not credential.security_token:
+    if not direct.security_token:
         logger.warning("临时凭证未包含 SecurityToken，若目标强制校验临时凭证将返回鉴权失败")
-    logger.info(credential.describe())
-    return credential
+    logger.info(direct.describe())
+    return direct
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -405,7 +555,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"{Fore.RED}[ERROR] {exc}{Style.RESET_ALL}")
         return 2
 
-    config["proxy"] = args.proxy
+    # 命令行 --proxy 优先于配置文件里的 proxy
+    if args.proxy:
+        config["proxy"] = args.proxy
+    if config.get("proxy"):
+        logger.info(f"所有请求（含 AI 与页面抓取）将经由代理: {config['proxy']}")
 
     ignore_path = args.ignore_file
     if not os.path.isabs(ignore_path):
@@ -514,8 +668,21 @@ def _print_banner() -> None:
 
 if __name__ == "__main__":
     colorama_init(autoreset=True)
+
+    # --help / -h 必须能直接看到参数说明，不应先被授权确认挡住
+    argv = sys.argv[1:]
+    if any(arg in ("-h", "--help") for arg in argv):
+        build_parser().parse_args(argv)
+
     _print_banner()
-    input(f"\n{Fore.CYAN}[+] 请确认已满足上述条件，按回车键开始扫描（关闭窗口可终止）...{Style.RESET_ALL}")
+    try:
+        input(f"\n{Fore.CYAN}[+] 请确认已满足上述条件，按回车键开始扫描（关闭窗口可终止）...{Style.RESET_ALL}")
+    except EOFError:
+        # 非交互环境（管道、CI）无法完成授权确认，明确拒绝而不是静默继续
+        print(f"\n{Fore.RED}[!] 当前环境无法进行交互确认，已终止。"
+              f"请在终端中运行本工具。{Style.RESET_ALL}")
+        raise SystemExit(2)
+
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:

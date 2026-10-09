@@ -230,6 +230,7 @@ class AIConfig:
     cache_path: str = ""
     ack_data_egress: bool = False
     api_key_source: str = ""
+    proxy: str = ""
 
     @classmethod
     def from_config(cls, config: Dict, tool_dir: str = "") -> "AIConfig":
@@ -260,6 +261,9 @@ class AIConfig:
         if cache and tool_dir and not os.path.isabs(cache):
             cache = os.path.join(tool_dir, cache)
 
+        # 代理：AI 专用配置优先，否则沿用全局代理——否则云端模型请求会绕过代理直连
+        proxy = _raw("proxy") or str(config.get("proxy", "") or "").strip()
+
         return cls(
             enabled=_bool("enabled"),
             provider=provider,
@@ -274,6 +278,7 @@ class AIConfig:
             cache_path=cache,
             ack_data_egress=_bool("ack_data_egress"),
             api_key_source=key_source,
+            proxy=proxy,
         )
 
 
@@ -310,6 +315,16 @@ class AIClient:
     @property
     def local(self) -> bool:
         return _is_local(self.config.base_url)
+
+    def _proxies(self) -> Optional[Dict[str, str]]:
+        """AI 请求的代理设置。
+
+        必须显式传代理：此前 AI 调用没有代理参数，用云端模型时会绕过用户
+        配置的代理直连，既可能连不上，也违反了「所有外发都走代理」的预期。
+        """
+        if not self.config.proxy:
+            return None
+        return {"http": self.config.proxy, "https": self.config.proxy}
 
     def unavailable_reason(self) -> Optional[str]:
         """返回不可用原因；None 表示可以尝试调用。"""
@@ -416,8 +431,11 @@ class AIClient:
 
     def _post_and_extract(self, url: str, headers: Dict, payload: Dict) -> Optional[str]:
         try:
-            response = requests.post(url, headers=headers, json=payload,
-                                     timeout=self.config.timeout)
+            response = requests.post(
+                url, headers=headers, json=payload,
+                timeout=self.config.timeout,
+                proxies=self._proxies(),
+            )
         except requests.exceptions.RequestException as exc:
             self._disabled_reason = f"无法连接 AI 端点 {self.config.base_url}：{exc}"
             logger.warning(self._disabled_reason + "（本次扫描将跳过所有 AI 步骤）")

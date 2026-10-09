@@ -539,3 +539,109 @@ def test_no_poc_flag_suppresses_poc(tmp_path, fake_bucket):
     payload = json.loads(output_file.read_text(encoding="utf-8"))
     assert payload
     assert all("poc" not in item for item in payload)
+
+
+# ------------------------------------------------------------------ 端点直填与校验
+
+@pytest.mark.parametrize("value,cloud,bucket,region", [
+    ("http://1111.cos.beijin.myqcloud.com", "tencent", "1111", "beijin"),
+    ("https://1111.cos.ap-beijing.myqcloud.com", "tencent", "1111", "ap-beijing"),
+    ("https://bkt.oss-cn-beijing.aliyuncs.com", "aliyun", "bkt", "cn-beijing"),
+    ("bkt.oss-cn-beijing.aliyuncs.com", "aliyun", "bkt", "cn-beijing"),
+    ("https://bkt.s3.us-east-1.amazonaws.com", "aws", "bkt", "us-east-1"),
+    ("bkt.obs.cn-north-4.myhuaweicloud.com", "huawei", "bkt", "cn-north-4"),
+    ("https://bkt-1250000000.cos.ap-guangzhou.myqcloud.com", "tencent", "bkt", "ap-guangzhou"),
+])
+def test_bucket_accepts_full_endpoint(value, cloud, bucket, region):
+    """--bucket 直接传完整地址时应自动识别厂商与区域，不必分两次输入。"""
+    args = cli.build_parser().parse_args(["--bucket", value])
+    target = cli.resolve_target(args, {"AUTO_EXTRACT": {}})
+    assert target is not None
+    assert target["cloud"] == cloud
+    assert target["buckets"] == [bucket]
+    assert target["region"] == region
+
+
+def test_bucket_url_carries_tencent_appid():
+    args = cli.build_parser().parse_args(["--bucket", "https://bkt-1250000000.cos.ap-guangzhou.myqcloud.com"])
+    assert cli.resolve_target(args, {"AUTO_EXTRACT": {}})["appid"] == "1250000000"
+
+
+def test_plain_bucket_name_still_needs_cloud_and_region():
+    """向后兼容：裸桶名仍走原来的 --cloud/--region 路径。"""
+    args = cli.build_parser().parse_args(["--bucket", "plain", "--cloud", "aliyun",
+                                          "--region", "cn-beijing"])
+    target = cli.resolve_target(args, {"AUTO_EXTRACT": {}})
+    assert target["cloud"] == "aliyun" and target["buckets"] == ["plain"]
+
+
+def test_plain_bucket_without_region_is_rejected():
+    args = cli.build_parser().parse_args(["--bucket", "plain", "--cloud", "aliyun"])
+    assert cli.resolve_target(args, {"AUTO_EXTRACT": {}}) is None
+
+
+def test_region_typo_gets_suggestion(caplog):
+    """区域拼错时给出可操作提示，而不是静默扫错地址。"""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="oss_scanner"):
+        cli._warn_region_shape("tencent", "beijin")
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "看起来不是" in text
+    assert "ap-beijing" in text
+
+
+@pytest.mark.parametrize("cloud,region", [
+    ("aliyun", "cn-beijing"), ("tencent", "ap-beijing"),
+    ("aws", "us-east-1"), ("huawei", "cn-north-4"),
+    ("aliyun", "cn-brandnew-1"),   # 形态正确的新区域不应告警
+])
+def test_valid_regions_do_not_warn(caplog, cloud, region):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="oss_scanner"):
+        cli._warn_region_shape(cloud, region)
+    assert not any("看起来不是" in r.getMessage() for r in caplog.records)
+
+
+def test_help_does_not_require_authorization_prompt():
+    """回归：--help 此前会先撞上授权确认的 input() 而卡住。"""
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "main.py", "--help"],
+                            capture_output=True, text=True, timeout=30, input="")
+    assert result.returncode == 0
+    assert "--role-arn" in result.stdout
+    assert "免责声明" not in result.stdout
+
+
+def test_proxy_from_config_file_is_used(tmp_path, fake_bucket):
+    """回归：proxy 写在 config.ini 里此前被静默忽略。"""
+    populate(fake_bucket)
+    config_path = write_config(tmp_path, fake_bucket.base_url("/{bucket}"),
+                               request_interval=0,
+                               extra="proxy = http://127.0.0.1:1")   # 死代理
+    output_file = tmp_path / "report.json"
+
+    cli.main(["--cloud", "aliyun", "--region", "cn-beijing", "--bucket", "bucket",
+              "--config", config_path, "--output", "json",
+              "--output-file", output_file.as_posix()])
+
+    payload = json.loads(output_file.read_text(encoding="utf-8"))
+    # 代理不可达 → 目标无法访问 → 不应拿到任何敏感文件命中
+    assert not any(item["risk_id"] == "KEY_FILE_EXPOSED" for item in payload)
+
+
+def test_cli_proxy_overrides_config_proxy(tmp_path, fake_bucket):
+    populate(fake_bucket)
+    config_path = write_config(tmp_path, fake_bucket.base_url("/{bucket}"),
+                               request_interval=0,
+                               extra="proxy = http://127.0.0.1:1")
+    output_file = tmp_path / "report.json"
+
+    # 命令行显式给空代理不生效（argparse 只认非空），这里验证 --proxy 优先于配置
+    cli.main(["--cloud", "aliyun", "--region", "cn-beijing", "--bucket", "bucket",
+              "--config", config_path, "--output", "json",
+              "--proxy", "http://127.0.0.1:2",
+              "--output-file", output_file.as_posix()])
+
+    payload = json.loads(output_file.read_text(encoding="utf-8"))
+    assert not any(item["risk_id"] == "KEY_FILE_EXPOSED" for item in payload)

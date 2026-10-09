@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Author](https://img.shields.io/badge/Author-sjdalu-orange)
-![Version](https://img.shields.io/badge/Version-v2.2.0-informational)
+![Version](https://img.shields.io/badge/Version-v2.3.0-informational)
 
 OSS_Scanner 是一款**多厂商 OSS 存储桶漏洞扫描工具**，支持阿里云 OSS、腾讯云 COS、华为云 OBS、AWS S3、GCP Cloud Storage、Azure Blob，检测敏感文件泄露、匿名上传 / 删除、CORS 配置过宽、策略过度宽松等风险，帮助安全测试人员在授权范围内快速发现存储桶配置问题。
 
@@ -80,10 +80,27 @@ python main.py \
   --output-file ./reports/aliyun_scan.html
 ```
 
-### 从端点地址自动识别厂商与区域
+### 直接传完整地址，自动识别厂商与区域
+
+不用担心厂商和区域填错——把地址直接交给 `--bucket` 或 `--hostid-url` 即可：
 
 ```bash
-python main.py --hostid-url https://bucket.oss-cn-beijing.aliyuncs.com --output html
+# 直接传端点地址
+python main.py --bucket https://bucket.oss-cn-beijing.aliyuncs.com --output html
+python main.py --bucket http://1111.cos.ap-beijing.myqcloud.com
+python main.py --bucket bkt.obs.cn-north-4.myhuaweicloud.com
+
+# 或用 --hostid-url，同样会自动识别
+python main.py --hostid-url https://bucket.s3.us-east-1.amazonaws.com --output html
+```
+
+腾讯云带 APPID 的地址也能正确拆出桶名与 APPID。
+区域写错时不会静默扫错地址，而是给出提示与修正建议：
+
+```
+[!] 区域 'beijin' 看起来不是 tencent 的有效区域，继续扫描可能得到「Bucket 不存在」的误判
+    是否想用 'ap-beijing'？
+    常见取值：ap-beijing、ap-shanghai、ap-guangzhou、ap-chengdu、ap-hongkong
 ```
 
 `--hostid-url` 支持三种输入，会自动选择最合适的方式：
@@ -126,7 +143,8 @@ python main.py \
 | `--output-file` | 结果保存路径（会自动创建目录） | 否  | `./reports/scan_report.html`                     |
 | `--thread`      | 并发扫描的 Bucket 数        | 否     | `5`（默认）                                      |
 | `--progress`    | 显示扫描进度条              | 否     | 无值                                             |
-| `--proxy`       | 代理地址                    | 否     | `http://127.0.0.1:8080`                          |
+| `--proxy`       | 代理地址（也可写在配置里）  | 否     | `http://127.0.0.1:8080`                          |
+| `--role-arn` 等 | 自动换取临时凭证            | 否     | 见「临时凭证」章节                               |
 | `--alert`       | 严重漏洞告警方式            | 否     | `dingtalk`/`email`                               |
 | `--debug`       | 输出调试日志                | 否     | 无值                                             |
 
@@ -243,9 +261,47 @@ src_paths = wwwroot/.git/config, backup/site.tar.gz, src.zip
 
 匿名扫描只能看到「对全网开放」的配置。很多真实问题——ACL 把权限授予了
 `AuthenticatedUsers`、策略只对已认证主体开放、历史版本里躺着已删除的密钥——
-**只有拿到凭证才看得到**。工具支持用各厂商 STS 签发的临时凭证以认证身份扫描。
+**只有拿到凭证才看得到**。凭证有两种来法。
 
-### 用法
+### 用法一：用长期凭证自动换取临时凭证（推荐）
+
+给一组具备 `sts:AssumeRole` 权限的长期凭证和 RoleArn，程序自己调 STS 换取
+临时凭证，用完即弃：
+
+```bash
+# 阿里云
+python main.py --bucket 目标桶 --cloud aliyun --region cn-beijing \
+  --role-arn acs:ram::1234567890:role/oss-scanner \
+  --role-ak "$ROLE_AK" --role-sk "$ROLE_SK"
+
+# AWS
+python main.py --bucket 目标桶 --cloud aws --region us-east-1 \
+  --role-arn arn:aws:iam::123456789012:role/oss-scanner \
+  --role-ak "$ROLE_AK" --role-sk "$ROLE_SK"
+```
+
+长期凭证也可以只放环境变量，不进命令行历史：
+
+```bash
+export OSS_SCANNER_ROLE_AK=...
+export OSS_SCANNER_ROLE_SK=...
+python main.py --bucket 目标桶 --cloud aliyun --region cn-beijing \
+  --role-arn acs:ram::1234567890:role/oss-scanner
+```
+
+| 参数 | 作用 |
+| ---- | ---- |
+| `--role-arn` | 要扮演的角色，填写即启用自动换取 |
+| `--role-ak` / `--role-sk` | 换取用的长期凭证（或 `OSS_SCANNER_ROLE_AK/SK`） |
+| `--role-session` | 会话名，默认 `oss-scanner-<时间戳>` |
+| `--role-duration` | 有效期（秒），默认 3600 |
+| `--sts-endpoint` | STS 端点，留空用官方地址（内网/私有部署时可指定） |
+
+已实现 **AWS**（SigV4，service 为 `sts`）与 **阿里云**（RPC 风格 HMAC-SHA1）。
+腾讯云（TC3）与华为云尚未实现换取所用的签名方案，指定 `--role-arn` 时会明确报错
+并提示改用用法二，**不会静默失败**。
+
+### 用法二：直接提供现成的临时凭证
 
 推荐用环境变量，避免密钥落在配置文件或命令历史里：
 
@@ -256,26 +312,29 @@ export OSS_SCANNER_STS_TOKEN=...
 python main.py --cloud aliyun --region cn-beijing --bucket 目标桶 --output html
 ```
 
-也可以走命令行（注意命令历史会留存）、凭证文件或配置：
+也可以指向一个 JSON 文件，AssumeRole 的响应原样保存即可（程序自动取出
+`Credentials` 字段）：
 
 ```bash
-# AssumeRole 接口的响应原样保存即可，程序会自动取出 Credentials 字段
 python main.py --cloud aws --region us-east-1 --bucket b --sts-file ./role-session.json
 ```
 
-优先级：`--sts-ak/--sts-sk/--sts-token` > 环境变量 > `--sts-file` /
-`[STS] credential_file` > `[STS]` 节点。
+来源优先级：命令行的 `--sts-*` > 环境变量 > `--sts-file` / `[STS] credential_file`
+> `[STS]` 节点。同时给了 `--sts-*` 与 `--role-arn` 时以前者为准，不重复申请。
 
 ### 支持的签名方案
 
-| 厂商 | 签名 | 令牌头 |
-| ---- | ---- | ------ |
-| AWS S3 | SigV4（已用 AWS 官方测试向量校验） | `x-amz-security-token` |
-| 华为云 OBS | SigV4（S3 兼容） | `x-obs-security-token` |
-| GCP | SigV4（service 为 `storage`，区域 `auto`） | `x-goog-security-token` |
-| 阿里云 OSS | OSS 签名（HMAC-SHA1，含子资源） | `x-oss-security-token` |
-| 腾讯云 COS | q-sign 签名 | `x-cos-security-token` |
-| Azure | 不支持 AK/SK，需改用 SAS | — |
+| 厂商 | 签名 | 令牌头 | 能否自动 AssumeRole |
+| ---- | ---- | ------ | ------------------- |
+| AWS S3 | SigV4（已用 AWS 官方测试向量校验） | `x-amz-security-token` | ✅ |
+| 阿里云 OSS | OSS 签名（HMAC-SHA1，含子资源） | `x-oss-security-token` | ✅ |
+| 华为云 OBS | SigV4（S3 兼容） | `x-obs-security-token` | 用现成凭证 |
+| GCP | SigV4（service 为 `storage`，区域 `auto`） | `x-goog-security-token` | 用现成凭证 |
+| 腾讯云 COS | q-sign 签名 | `x-cos-security-token` | 用现成凭证 |
+| Azure | 不支持 AK/SK，需改用 SAS | — | — |
+
+> 「签名扫描」与「自动换取」是两件事：腾讯云、华为云、GCP 都能用现成临时凭证
+> 做认证态扫描，只是暂时不能自动换取。
 
 ### 安全约束
 
@@ -285,6 +344,27 @@ python main.py --cloud aws --region us-east-1 --bucket b --sts-file ./role-sessi
 - 凭证过期、只有一半字段、厂商不支持签名等情况会明确报错，**不会静默退化成匿名扫描**。
 - 所有结果都带 `auth_mode` 字段（`anonymous` / `authenticated`），报告里认证态条目会标注
   「认证态发现」，便于区分「公开可访问」与「该凭证可访问」。
+
+## 🌐 代理配置
+
+代理可以写在配置文件里，也可以用命令行覆盖：
+
+```ini
+[DEFAULT]
+proxy = http://127.0.0.1:7897
+```
+
+```bash
+python main.py --proxy http://127.0.0.1:8080 ...
+```
+
+命令行 `--proxy` 优先于配置文件。**扫描目标、抓取 HostId 页面、调用 AI 三类请求
+都会走这个代理**，确保所有外发流量可被统一审计或拦截。AI 也可以单独指定：
+
+```ini
+[AI_CONFIG]
+proxy = socks5://127.0.0.1:1080   # 留空则沿用上面的全局代理
+```
 
 ## 🎯 PoC 复现命令
 
@@ -415,12 +495,13 @@ python -m pytest tests/ -q
 
 - 作者：sjdalu
 - 项目地址：[https://github.com/bitboy-sys/OSS_scanner](https://github.com/bitboy-sys/OSS_scanner)
-- 版本：v2.2.0
+- 版本：v2.3.0
 
 ## 📝 版本更新日志
 
 | 版本   | 更新时间   | 主要更新内容                                                 |
 | ------ | ---------- | ------------------------------------------------------------ |
+| v2.3.0 | 2026-10    | 修复 proxy 从配置文件读取不生效、AI 请求绕过代理；新增 AssumeRole 自动换取临时凭证（AWS/阿里云）；--bucket 可直接传完整端点地址自动识别厂商与区域，区域拼写错误给出修正建议；修复 --help 被授权确认阻塞 |
 | v2.2.0 | 2026-10    | 新增临时凭证（STS）认证态扫描：AWS/华为/GCP SigV4（经官方测试向量校验）、阿里云 V1、腾讯云签名；新增 ACL 授权项、版本控制历史恢复、静态网站、防盗链、跨账号复制检测；区域自动发现；每条漏洞生成可运行 PoC 命令（认证态用占位符）；AI 支持 8 家厂商预设（含 DeepSeek）并从环境变量读密钥 |
 | v2.1.0 | 2026-10    | 新增 AI 研判能力：执行摘要与修复计划、误报降噪、泄露内容凭据识别与脱敏；提示词可编辑；默认走本地 Ollama，非本机端点需显式确认 |
 | v2.0.0 | 2026-10    | 修复严重度误判与 JSON 输出崩溃；引入写操作总闸门（默认关闭）；风险项改为稳定 ID + 元数据表；厂商逻辑声明式重构（新增 GCP / Azure）；端点解析统一；全局令牌桶限速 + 连接池复用，单桶耗时从 100 秒以上降至 15 秒以内；补齐证据字段；HTML 报告开启 autoescape；新增离线测试、LICENSE、.gitignore |
@@ -430,6 +511,7 @@ python -m pytest tests/ -q
 
 ## 🔭 后续计划
 
+- **AssumeRole 补全**：腾讯云（TC3）与华为云的自动换取代签方案。
 - **端点族补全**：`s3-accelerate`、`s3.dualstack.{region}`、`oss-{region}-internal` 等变体（区域发现已落地）。
 - **域名接管检测**：悬空 CNAME 指向已释放的存储桶（需要 DNS 解析，将引入 `dnspython` 可选依赖）。
 - **发现能力**：由关键字生成 Bucket 名候选并批量探测，把工具从「验证器」扩展为「发现 + 验证」。

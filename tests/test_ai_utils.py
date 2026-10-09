@@ -441,3 +441,30 @@ def test_ai_config_defaults_to_disabled():
     assert ai_config.enabled is False
     assert ai_config.redact is True
     assert ai_config.ack_data_egress is False
+
+
+def test_ai_requests_go_through_configured_proxy(fake_bucket):
+    """回归：AI 调用此前不带代理参数，会绕过代理直连。
+
+    把代理指向死端口：若代理真的被使用，AI 调用应当失败并降级。
+    """
+    fake_bucket.route_ai(json.dumps({"executive_summary": "不应被取到"}))
+    client = make_client(fake_bucket, proxy="http://127.0.0.1:1")
+    assert client.chat_json("report", "{}") is None
+    assert client.unavailable_reason() is not None
+
+
+def test_ai_without_proxy_still_works(fake_bucket):
+    fake_bucket.route_ai(json.dumps({"executive_summary": "正常"}))
+    client = make_client(fake_bucket, proxy="")
+    assert client.chat_json("report", "{}")["executive_summary"] == "正常"
+
+
+def test_proxies_helper_returns_none_without_proxy():
+    client = AIClient(AIConfig(enabled=True, base_url="http://127.0.0.1:11434/v1",
+                               model="m", proxy=""))
+    assert client._proxies() is None
+    client2 = AIClient(AIConfig(enabled=True, base_url="http://127.0.0.1:11434/v1",
+                                model="m", proxy="http://127.0.0.1:7897"))
+    assert client2._proxies() == {"http": "http://127.0.0.1:7897",
+                                  "https": "http://127.0.0.1:7897"}
